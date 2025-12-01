@@ -1,0 +1,14 @@
+hostname FW_01_PRIMARY
+!
+cluster group FW_HA_GROUP
+  priority 100
+  preempt
+  member 1 ip 192.168.1.254
+!
+interface Ethernet0
+  nameif outside
+  security-level 0
+  ip address 203.0.113.10 255.255.255.240
+!
+logging enable
+logging host inside 192.168.100.5
