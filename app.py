@@ -5,15 +5,13 @@ import google.generativeai as genai
 
 # データ・ロジック・運用モジュールのインポート
 from data import TOPOLOGY
-# simulate_cascade_failure を追加でインポート
 from logic import CausalInferenceEngine, Alarm, simulate_cascade_failure
-# 実機接続の代わりにスタブ(シミュレーション)関数を使用
 from network_ops import run_diagnostic_simulation
 
 # --- ページ設定 ---
 st.set_page_config(page_title="Antigravity Live", page_icon="⚡", layout="wide")
 
-# --- 関数: トポロジー図の生成 (冗長構成対応) ---
+# --- 関数: トポロジー図の生成 ---
 def render_topology(alarms, root_cause_node):
     graph = graphviz.Digraph()
     graph.attr(rankdir='TB')
@@ -21,14 +19,12 @@ def render_topology(alarms, root_cause_node):
     
     alarmed_ids = {a.device_id for a in alarms}
     
-    # ノード描画
     for node_id, node in TOPOLOGY.items():
         color = "#e8f5e9" # Default Green
         penwidth = "1"
         fontcolor = "black"
         label = f"{node_id}\n({node.type})"
         
-        # 根本原因は赤、アラーム発生中は黄色
         if root_cause_node and node_id == root_cause_node.id:
             color = "#ffcdd2" # Root Cause Red
             penwidth = "3"
@@ -38,12 +34,9 @@ def render_topology(alarms, root_cause_node):
         
         graph.node(node_id, label=label, fillcolor=color, color='black', penwidth=penwidth, fontcolor=fontcolor)
     
-    # エッジ描画
     for node_id, node in TOPOLOGY.items():
         if node.parent_id:
             graph.edge(node.parent_id, node_id)
-            
-            # 親がHAグループの場合、相方からも線を引く
             parent_node = TOPOLOGY.get(node.parent_id)
             if parent_node and parent_node.redundancy_group:
                 partners = [n.id for n in TOPOLOGY.values() 
@@ -52,7 +45,7 @@ def render_topology(alarms, root_cause_node):
                     graph.edge(partner_id, node_id)
     return graph
 
-# --- 関数: Config自動読み込み (IDベース) ---
+# --- 関数: Config自動読み込み ---
 def load_config_by_id(device_id):
     path = f"configs/{device_id}.txt"
     if os.path.exists(path):
@@ -95,6 +88,7 @@ if "current_scenario" not in st.session_state:
     st.session_state.messages = []
     st.session_state.chat_session = None 
     st.session_state.live_result = None
+    st.session_state.trigger_analysis = False # 診断後の分析トリガー
 
 # シナリオ変更時のリセット処理
 if st.session_state.current_scenario != selected_scenario:
@@ -102,23 +96,19 @@ if st.session_state.current_scenario != selected_scenario:
     st.session_state.messages = []
     st.session_state.chat_session = None
     st.session_state.live_result = None
+    st.session_state.trigger_analysis = False
     st.rerun()
 
-# --- アラーム生成ロジック (シミュレーション用) ---
+# --- アラーム生成ロジック ---
 alarms = []
-
 if selected_scenario == "1. WAN全回線断":
-    # 【自動生成】WANルータを起点に、配下全機器のアラームを自動生成する
-    # これにより、data.pyの構成が変わってもコード修正なしで追従可能
     alarms = simulate_cascade_failure("WAN_ROUTER_01", TOPOLOGY)
-
 elif selected_scenario == "2. FW片系障害":
     alarms = [Alarm("FW_01_PRIMARY", "Heartbeat Loss", "WARNING")]
-
 elif selected_scenario == "3. L2SWサイレント障害":
     alarms = [Alarm("AP_01", "Connection Lost", "CRITICAL"), Alarm("AP_02", "Connection Lost", "CRITICAL")]
 
-# 推論実行 (通常シナリオの場合)
+# 推論実行
 root_cause = None
 inference_result = None
 reason = ""
@@ -137,7 +127,6 @@ with col1:
     st.subheader("Network Status")
     st.graphviz_chart(render_topology(alarms, root_cause), use_container_width=True)
     
-    # アラート表示
     if root_cause:
         st.markdown(
             f'<div style="color: #d32f2f; font-weight: bold; font-size: 15px; background-color: #fdecea; padding: 10px; border-radius: 5px;">'
@@ -147,22 +136,19 @@ with col1:
         )
         st.caption(f"理由: {reason}")
     
-    # Liveモードの場合のUI
     is_live_mode = (selected_scenario == "4. [Live] Cisco実機診断")
     
-    # 障害発生時またはLiveモード時に調査ボタンを表示
     if is_live_mode or root_cause:
         st.markdown("---")
         st.info("🛠 **自律調査エージェント**")
         
-        # ボタン: 診断実行 (スタブ関数を呼び出し)
+        # ボタン: 診断実行
         if st.button("🚀 診断実行 (Simulation)", type="primary"):
             if not api_key:
                 st.error("API Key Required")
             else:
                 with st.status("Agent Operating...", expanded=True) as status:
                     st.write("🔌 Initiating connection simulation...")
-                    # スタブ関数を呼び出して結果を取得
                     res = run_diagnostic_simulation(selected_scenario)
                     st.session_state.live_result = res
                     
@@ -170,143 +156,132 @@ with col1:
                         st.write("✅ Data retrieved.")
                         status.update(label="Complete!", state="complete", expanded=False)
                     else:
-                        st.write("❌ Connection Failed (As expected in failure scenario).")
+                        st.write("❌ Connection Failed (As expected).")
                         status.update(label="Target Unreachable", state="error", expanded=False)
                     
-                    # 【重要】ボタン押下時にセッションをリセットし、新しい診断データでAIを再起動させる
-                    st.session_state.chat_session = None 
-                    st.session_state.messages = []
+                    # 【重要修正】チャットをリセットせず、次の分析トリガーだけONにする
+                    st.session_state.trigger_analysis = True
                     st.rerun()
 
-        # 診断結果の表示
+        # 診断結果表示
         if st.session_state.live_result:
             res = st.session_state.live_result
             if res["status"] == "SUCCESS":
-                # セキュリティバナー
                 st.success("🛡️ **Data Sanitized**: パスワード・IPアドレスをマスク処理しました。")
-                
                 with st.expander("📄 取得ログ (Sanitized View)", expanded=True):
                     st.code(res["sanitized_log"], language="text")
             else:
                 st.error(f"診断結果: {res['error']}")
                 st.caption("※エージェントはこの接続エラー自体を『診断情報』として利用します。")
 
-# 右カラム：AIチャット (スクロール対応)
+# 右カラム：AIチャット
 with col2:
     st.subheader("AI Analyst Report")
 
-    # APIキーチェック
     if not api_key:
         st.error("APIキーを設定してください")
         st.stop()
 
-    # チャットセッション初期化
-    # Live結果がある、または通常推論がある場合に起動
-    should_start_chat = (st.session_state.chat_session is None) and (selected_scenario != "正常稼働")
-    
-    if should_start_chat:
+    # Gemini初期設定 (まだセッションがない場合のみ)
+    if st.session_state.chat_session is None and selected_scenario != "正常稼働":
         genai.configure(api_key=api_key)
-        
-        # 設定: Gemini 2.0 Flash, 温度0
-        generation_config = {
-            "temperature": 0.0,
-            "max_output_tokens": 1500,
-        }
+        generation_config = {"temperature": 0.0, "max_output_tokens": 1500}
         model = genai.GenerativeModel("gemini-2.0-flash", generation_config=generation_config)
         
-        # --- プロンプト構築 ---
+        # --- 初期分析プロンプト (トポロジー視点) ---
         system_prompt = ""
-        
-        # A. Live診断結果がある場合 (Liveモード優先)
-        if st.session_state.live_result:
-            live_data = st.session_state.live_result
-            
-            # ログの中身またはエラーメッセージを取得
-            log_content = live_data.get('sanitized_log')
-            if not log_content or log_content.strip() == "":
-                log_content = f"接続エラー: {live_data.get('error')}"
-
-            system_prompt = f"""
-            あなたはネットワークエンジニアです。以下の診断結果に基づき、トラブルシューティングの経緯を報告してください。
-
-            【診断入力データ】
-            ステータス: {live_data['status']}
-            詳細情報: {log_content}
-            推論された原因: {reason if reason else "実機調査モード"}
-
-            【出力要件】
-            以下のフォーマットで出力すること。
-            
-            ### 🛠 ネクストアクション実行レポート
-            
-            **1. データ保全と接続確認:**
-            接続試行およびログ取得を実施。
-            → **結果: {live_data['status']}** (🛡️ 機密情報はフィルタリング済み)
-            
-            **2. 詳細分析:**
-            [接続エラーの場合は『疎通不可のため確認できません』と記述。ログがある場合は内容を分析]
-            → [分析結果]
-            
-            **3. 物理/インターフェース確認:**
-            [接続エラーの場合は『電源断や物理障害の可能性大』と推論]
-            → [分析結果]
-            
-            ---
-            **最終判定:** [結論]
-            """
-
-        # B. 通常の推論モードの場合 (Live診断前)
-        elif root_cause:
-            # Config読み込み
+        if root_cause:
             config_content = load_config_by_id(root_cause.id)
-            
             system_prompt = f"""
-            あなたはAIOpsエージェントです。以下の障害について報告してください。
-            
+            あなたはAIOpsエージェントです。以下の障害について初期報告してください。
             根本原因: {root_cause.id} ({root_cause.type})
-            理由: {inference_result.root_cause_reason}
+            理由: {reason}
             """
-            
             if config_content:
-                system_prompt += f"\n【Configあり】\n{config_content}\n上記設定に基づき、具体的な確認コマンドを提案してください。"
+                system_prompt += f"\n【Configあり】\n{config_content}\n上記設定に基づき、疑わしい箇所を指摘してください。"
             else:
                 system_prompt += "\n【Configなし】\n一般的な復旧手順を提示してください。"
             
-            system_prompt += "\nフォーマット: 緊急度(絵文字)、状況要約、推奨SOPの順で出力。"
+            system_prompt += "\nフォーマット: 緊急度(絵文字)、状況要約、推奨アクション(調査など)の順。"
 
-        # チャット開始 (プロンプトがある場合のみ)
         if system_prompt:
             history = [{"role": "user", "parts": [system_prompt]}]
             chat = model.start_chat(history=history)
-            
             try:
-                # 最初の分析を実行
-                with st.spinner("Gemini is analyzing..."):
-                    response = chat.send_message("レポートを作成してください。")
+                with st.spinner("Initial Analysis..."):
+                    response = chat.send_message("状況報告をお願いします。")
                     st.session_state.chat_session = chat
                     st.session_state.messages.append({"role": "assistant", "content": response.text})
             except Exception as e:
                 st.error(f"Error: {e}")
 
-    # --- チャットUIの表示 (スクロールコンテナ) ---
+    # --- 診断実行後の追加分析 (トリガーがONの時) ---
+    if st.session_state.trigger_analysis and st.session_state.chat_session:
+        live_data = st.session_state.live_result
+        log_content = live_data.get('sanitized_log') or f"接続エラー: {live_data.get('error')}"
+        
+        # 追記用プロンプト
+        follow_up_prompt = f"""
+        自律調査エージェントが診断コマンドを実行しました。
+        以下の実行結果に基づき、詳細な『ネクストアクション実行レポート』を作成してください。
+
+        【診断入力データ】
+        ステータス: {live_data['status']}
+        詳細情報: {log_content}
+
+        【出力要件】
+        以下のフォーマットで出力すること。
+        
+        ### 🛠 ネクストアクション実行レポート
+        
+        **1. データ保全と接続確認:**
+        接続試行およびログ取得を実施。
+        → **結果: {live_data['status']}** (🛡️ 機密情報はフィルタリング済み)
+        
+        **2. 詳細分析:**
+        [接続エラーの場合は『疎通不可のため確認できません』と記述。ログがある場合は内容を分析]
+        → [分析結果]
+        
+        **3. 物理/インターフェース確認:**
+        [接続エラーの場合は『電源断や物理障害の可能性大』と推論]
+        → [分析結果]
+        
+        ---
+        **最終判定:** [結論]
+        """
+        
+        # ユーザーメッセージとして履歴に追加
+        st.session_state.messages.append({"role": "user", "content": "診断を実行しました。結果を分析してください。"})
+        
+        with st.spinner("Analyzing Diagnostic Data..."):
+            try:
+                response = st.session_state.chat_session.send_message(follow_up_prompt)
+                st.session_state.messages.append({"role": "assistant", "content": response.text})
+            except Exception as e:
+                st.error(f"Error: {e}")
+        
+        # トリガーをOFFに戻す
+        st.session_state.trigger_analysis = False
+        st.rerun()
+
+    # --- チャットUI表示 (スクロールコンテナ) ---
     chat_container = st.container(height=600)
     
     with chat_container:
-        # 履歴表示
         for message in st.session_state.messages:
+            # 内部的なプロンプトは見せず、ユーザーの会話として自然なものを表示
+            if "以下の診断結果に基づき" in message["content"]:
+                continue # プロンプト自体は非表示にするフィルタ
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    # 入力欄 (コンテナの外に配置して固定)
+    # 入力欄
     if prompt := st.chat_input("AIエージェントに指示..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
-        
-        # ユーザー入力を即時表示
         with chat_container:
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-        # AI応答
         if st.session_state.chat_session:
             with chat_container:
                 with st.chat_message("assistant"):
