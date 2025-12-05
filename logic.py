@@ -1,6 +1,5 @@
 """
 Google Antigravity AIOps Agent - ロジックモジュール
-根本原因分析および重要度(Severity)の動的判定ロジックを実装。
 """
 
 from typing import List, Dict, Set, Optional
@@ -43,14 +42,17 @@ class CausalInferenceEngine:
         if not top_node:
              return InferenceResult(None, "不明なデバイス", "DEFAULT", alarms, "UNKNOWN")
 
+        # A. 冗長性ルール (HA構成)
         if top_node.redundancy_group:
             return self._analyze_redundancy(top_node, alarmed_device_ids, alarms, alarm_map)
 
+        # B. サイレント障害推論
         if top_node.parent_id:
             silent_res = self._check_silent_failure_for_parent(top_node.parent_id, alarmed_device_ids)
             if silent_res:
                 return silent_res
 
+        # C. 単一機器障害
         root_severity = top_alarm.severity
         return InferenceResult(
             root_cause_node=top_node,
@@ -105,9 +107,11 @@ class CausalInferenceEngine:
             )
         return None
 
-def simulate_cascade_failure(root_cause_id: str, topology: Dict[str, NetworkNode]) -> List[Alarm]:
+# ★★★ 修正: メッセージを引数で指定できるように変更 ★★★
+def simulate_cascade_failure(root_cause_id: str, topology: Dict[str, NetworkNode], custom_message: str = "Interface Down") -> List[Alarm]:
     generated_alarms = []
-    generated_alarms.append(Alarm(root_cause_id, "Interface Down", "CRITICAL"))
+    # 根本原因のアラーム (メッセージを動的に設定)
+    generated_alarms.append(Alarm(root_cause_id, custom_message, "CRITICAL"))
     
     queue = [root_cause_id]
     processed = {root_cause_id}
@@ -117,6 +121,7 @@ def simulate_cascade_failure(root_cause_id: str, topology: Dict[str, NetworkNode
         children = [n for n in topology.values() if n.parent_id == current_parent_id]
         for child in children:
             if child.id not in processed:
+                # 子機器のアラーム生成 (Unreachable)
                 generated_alarms.append(Alarm(child.id, "Unreachable", "WARNING"))
                 queue.append(child.id)
                 processed.add(child.id)
