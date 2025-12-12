@@ -259,7 +259,7 @@ if app_mode == "🚨 障害対応":
         should_start_chat = (st.session_state.chat_session is None) and (selected_scenario != "正常稼働")
         if should_start_chat:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel("gemini-1.5-flash", generation_config={"temperature": 0.0})
+            model = genai.GenerativeModel("gemma-3-12b-it", generation_config={"temperature": 0.0})
             
             system_prompt = ""
             if st.session_state.live_result:
