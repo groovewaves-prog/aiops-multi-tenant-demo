@@ -6,7 +6,6 @@ import google.generativeai as genai
 from data import TOPOLOGY
 from logic import CausalInferenceEngine, Alarm, simulate_cascade_failure
 from network_ops import run_diagnostic_simulation, generate_config_from_intent, generate_health_check_commands
-# ★追加: 検証モジュール
 from verifier import verify_log_content, format_verification_report
 
 # --- ページ設定 ---
@@ -41,8 +40,10 @@ def render_topology(alarms, root_cause_node, root_severity="CRITICAL"):
                 color = "#fff9c4" # Yellow
             else:
                 color = "#e8f5e9"
+            
             penwidth = "3"
             label += "\n[ROOT CAUSE]"
+            
         elif node_id in alarmed_ids:
             color = "#fff9c4" # 連鎖アラーム
         
@@ -112,7 +113,7 @@ if "current_mode" not in st.session_state:
     st.session_state.chat_session = None 
     st.session_state.live_result = None
     st.session_state.trigger_analysis = False
-    st.session_state.verification_result = None # 検証結果保持用
+    st.session_state.verification_result = None
 
 if st.session_state.current_mode != app_mode:
     st.session_state.current_mode = app_mode
@@ -220,7 +221,6 @@ if app_mode == "🚨 障害対応":
                             st.write("✅ Data Acquired.")
                             status.update(label="Complete!", state="complete", expanded=False)
                             
-                            # ★追加: ここで「検証モジュール」を実行
                             log_content = res.get('sanitized_log', "")
                             verification = verify_log_content(log_content)
                             st.session_state.verification_result = verification
@@ -230,7 +230,12 @@ if app_mode == "🚨 障害対応":
                         else:
                             st.write("❌ Check Failed.")
                             status.update(label="Target Unreachable", state="error", expanded=False)
-                            st.session_state.verification_result = {"status": "Connection Failed"}
+                            st.session_state.verification_result = {
+                                "ping_status": "N/A (Connection Failed)",
+                                "interface_status": "Unknown",
+                                "hardware_status": "Unknown",
+                                "error_keywords": "Connection Error"
+                            }
                         
                         st.session_state.trigger_analysis = True
                         st.rerun()
@@ -242,13 +247,12 @@ if app_mode == "🚨 障害対応":
                     with st.expander("📄 取得ログ (Sanitized)", expanded=True):
                         st.code(res["sanitized_log"], language="text")
                     
-                    # ★追加: 検証結果の表示 (Human/Script Verification)
                     if st.session_state.verification_result:
                         with st.expander("✅ 自動検証結果 (Rule-Based Check)", expanded=True):
                             v = st.session_state.verification_result
                             st.write(f"- **Ping**: {v.get('ping_status')}")
                             st.write(f"- **Interface**: {v.get('interface_status')}")
-                            st.write(f"- **Hardware**: {v.get('hardware_error')}")
+                            st.write(f"- **Hardware**: {v.get('hardware_status')}")
                 elif res["status"] == "ERROR":
                     st.error(f"診断結果: {res['error']}")
 
@@ -259,6 +263,7 @@ if app_mode == "🚨 障害対応":
         should_start_chat = (st.session_state.chat_session is None) and (selected_scenario != "正常稼働")
         if should_start_chat:
             genai.configure(api_key=api_key)
+            # ★変更: gemma-3-12b-it
             model = genai.GenerativeModel("gemma-3-12b-it", generation_config={"temperature": 0.0})
             
             system_prompt = ""
@@ -284,7 +289,6 @@ if app_mode == "🚨 障害対応":
             live_data = st.session_state.live_result
             log_content = live_data.get('sanitized_log') or f"Error: {live_data.get('error')}"
             
-            # ★追加: 検証結果をプロンプトに注入 (メタ認知)
             verification_text = ""
             if st.session_state.verification_result:
                 verification_text = format_verification_report(st.session_state.verification_result)
@@ -333,9 +337,8 @@ if app_mode == "🚨 障害対応":
                             st.markdown(res.text)
                             st.session_state.messages.append({"role": "assistant", "content": res.text})
 
-# ... (モードBは変更なし) ...
+# ... (モードB) ...
 elif app_mode == "🔧 設定生成":
-    # (既存コード維持)
     st.subheader("🔧 Intent-Based Config Generator")
     c1, c2 = st.columns([1, 1])
     with c1:
