@@ -11,13 +11,15 @@ from verifier import verify_log_content, format_verification_report
 # --- ページ設定 ---
 st.set_page_config(page_title="Antigravity Live", page_icon="⚡", layout="wide")
 
-# --- 関数: トポロジー図の生成 ---
+# --- 関数: トポロジー図の生成 (修正版) ---
 def render_topology(alarms, root_cause_node, root_severity="CRITICAL"):
     graph = graphviz.Digraph()
     graph.attr(rankdir='TB')
     graph.attr('node', shape='box', style='rounded,filled', fontname='Helvetica')
     
-    alarmed_ids = {a.device_id for a in alarms}
+    # アラーム辞書（ID -> Alarmオブジェクト）を作成
+    alarm_map = {a.device_id: a for a in alarms}
+    alarmed_ids = set(alarm_map.keys())
     
     for node_id, node in TOPOLOGY.items():
         color = "#e8f5e9" # Default Green
@@ -33,11 +35,17 @@ def render_topology(alarms, root_cause_node, root_severity="CRITICAL"):
         if vendor:
             label += f"\n[{vendor}]"
 
+        # 根本原因ノードの描画
         if root_cause_node and node_id == root_cause_node.id:
-            if root_severity == "CRITICAL":
-                color = "#ffcdd2" # Red
-            elif root_severity == "WARNING":
-                color = "#fff9c4" # Yellow
+            # 【修正】ロジック判定(root_severity)ではなく、個別のAlarm重要度を優先して色を決める
+            # これにより「HAでサービスは継続(Warning)だが、機器自体はダウン(Critical)」を赤く表示できる
+            this_alarm = alarm_map.get(node_id)
+            node_severity = this_alarm.severity if this_alarm else root_severity
+            
+            if node_severity == "CRITICAL":
+                color = "#ffcdd2" # Red (Down)
+            elif node_severity == "WARNING":
+                color = "#fff9c4" # Yellow (Warning)
             else:
                 color = "#e8f5e9"
             
@@ -45,7 +53,8 @@ def render_topology(alarms, root_cause_node, root_severity="CRITICAL"):
             label += "\n[ROOT CAUSE]"
             
         elif node_id in alarmed_ids:
-            color = "#fff9c4" # 連鎖アラーム
+            # 連鎖アラーム等は黄色
+            color = "#fff9c4" 
         
         graph.node(node_id, label=label, fillcolor=color, color='black', penwidth=penwidth, fontcolor=fontcolor)
     
@@ -197,6 +206,7 @@ if app_mode == "🚨 障害対応":
         st.graphviz_chart(render_topology(alarms, root_cause, root_severity), use_container_width=True)
         
         if root_cause:
+            # メッセージは「システムへの影響度(root_severity)」を表示
             if root_severity == "CRITICAL":
                 st.markdown(f'<div style="color:#d32f2f;background:#fdecea;padding:10px;border-radius:5px;">🚨 緊急アラート：{root_cause.id} ダウン</div>', unsafe_allow_html=True)
             else:
@@ -263,7 +273,7 @@ if app_mode == "🚨 障害対応":
         should_start_chat = (st.session_state.chat_session is None) and (selected_scenario != "正常稼働")
         if should_start_chat:
             genai.configure(api_key=api_key)
-            # ★変更: gemma-3-12b-it
+            # モデル: gemma-3-12b-it
             model = genai.GenerativeModel("gemma-3-12b-it", generation_config={"temperature": 0.0})
             
             system_prompt = ""
@@ -337,7 +347,7 @@ if app_mode == "🚨 障害対応":
                             st.markdown(res.text)
                             st.session_state.messages.append({"role": "assistant", "content": res.text})
 
-# ... (モードB) ...
+# ... (モードB: 設定生成は変更なし) ...
 elif app_mode == "🔧 設定生成":
     st.subheader("🔧 Intent-Based Config Generator")
     c1, c2 = st.columns([1, 1])
