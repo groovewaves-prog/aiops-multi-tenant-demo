@@ -106,7 +106,8 @@ with st.sidebar:
         "WAN Router": ["4. [WAN] 電源障害：片系", "5. [WAN] 電源障害：両系", "6. [WAN] BGPルートフラッピング", "7. [WAN] FAN故障", "8. [WAN] メモリリーク"],
         "Firewall (Juniper)": ["9. [FW] 電源障害：片系", "10. [FW] 電源障害：両系", "11. [FW] FAN故障", "12. [FW] メモリリーク"],
         "L2 Switch": ["13. [L2SW] 電源障害：片系", "14. [L2SW] 電源障害：両系", "15. [L2SW] FAN故障", "16. [L2SW] メモリリーク"],
-        "Live Mode": ["99. [Live] Cisco実機診断"]
+        # ★追加: 複合障害シナリオ
+        "複合・その他": ["17. [WAN] 複合障害：電源＆FAN", "99. [Live] Cisco実機診断"]
     }
     selected_category = st.selectbox("対象カテゴリ:", list(SCENARIO_MAP.keys()))
     selected_scenario = st.radio("発生シナリオ:", SCENARIO_MAP[selected_category])
@@ -122,7 +123,7 @@ if "current_scenario" not in st.session_state:
     st.session_state.current_scenario = "正常稼働"
 
 # 変数初期化
-for key in ["live_result", "messages", "chat_session", "trigger_analysis", "verification_result", "generated_report", "verification_log"]:
+for key in ["live_result", "messages", "chat_session", "trigger_analysis", "verification_result", "generated_report", "verification_log", "last_report_cand_id"]:
     if key not in st.session_state:
         st.session_state[key] = None if key != "messages" and key != "trigger_analysis" else ([] if key == "messages" else False)
 
@@ -136,6 +137,7 @@ if st.session_state.current_scenario != selected_scenario:
     st.session_state.verification_result = None
     st.session_state.generated_report = None
     st.session_state.verification_log = None 
+    st.session_state.last_report_cand_id = None
     if "remediation_plan" in st.session_state: del st.session_state.remediation_plan
     if "bayes_engine" in st.session_state: del st.session_state.bayes_engine
     st.rerun()
@@ -148,7 +150,7 @@ root_severity = "CRITICAL"
 target_device_id = None
 is_live_mode = False
 
-# 1. アラーム生成
+# 1. アラーム生成ロジック (複合障害のロジックを追加)
 if "Live" in selected_scenario: is_live_mode = True
 elif "WAN全回線断" in selected_scenario:
     target_device_id = find_target_node_id(TOPOLOGY, node_type="ROUTER")
@@ -163,7 +165,17 @@ elif "L2SWサイレント障害" in selected_scenario:
     if target_device_id:
         child_nodes = [nid for nid, n in TOPOLOGY.items() if n.parent_id == target_device_id]
         alarms = [Alarm(child, "Connection Lost", "CRITICAL") for child in child_nodes]
+elif "複合障害" in selected_scenario:
+    # ★追加: 電源とFANの同時故障
+    target_device_id = find_target_node_id(TOPOLOGY, node_type="ROUTER")
+    if target_device_id:
+        alarms = [
+            Alarm(target_device_id, "Power Supply 1 Failed", "CRITICAL"),
+            Alarm(target_device_id, "Fan Fail", "WARNING")
+        ]
+        root_severity = "CRITICAL"
 else:
+    # 単体障害系
     if "[WAN]" in selected_scenario: target_device_id = find_target_node_id(TOPOLOGY, node_type="ROUTER")
     elif "[FW]" in selected_scenario: target_device_id = find_target_node_id(TOPOLOGY, node_type="FIREWALL")
     elif "[L2SW]" in selected_scenario: target_device_id = find_target_node_id(TOPOLOGY, node_type="SWITCH", layer=4)
@@ -188,7 +200,7 @@ else:
             alarms = [Alarm(target_device_id, "Memory High", "WARNING")]
             root_severity = "WARNING"
 
-# 2. ベイズエンジン初期化 (AI自動推論)
+# 2. ベイズエンジン初期化
 if "bayes_engine" not in st.session_state:
     st.session_state.bayes_engine = BayesianRCA(TOPOLOGY)
     
@@ -204,11 +216,10 @@ if "bayes_engine" not in st.session_state:
 # 3. コックピット表示
 selected_incident_candidate = None
 if "bayes_engine" in st.session_state:
-    # ★変更点: alarmsを渡して数字を計算させる
     selected_incident_candidate = render_intelligent_alarm_viewer(
         st.session_state.bayes_engine, 
         selected_scenario,
-        alarms
+        alarms 
     )
 
 # 4. 画面分割
@@ -263,7 +274,6 @@ with col_map:
         if res["status"] == "SUCCESS":
             st.markdown("#### 📄 Diagnostic Results")
             with st.container(border=True):
-                # 自動検証結果
                 if st.session_state.verification_result:
                     v = st.session_state.verification_result
                     c1, c2, c3 = st.columns(3)
@@ -272,7 +282,6 @@ with col_map:
                     c3.metric("Hardware", v.get('hardware_status'))
                 
                 st.divider()
-                # ログ出力
                 st.caption("🔒 Raw Logs (Sanitized)")
                 st.code(res["sanitized_log"], language="text")
         elif res["status"] == "ERROR":
@@ -282,22 +291,25 @@ with col_map:
 with col_chat:
     st.subheader("📝 AI Analyst Report")
     
-    # --- A. 状況報告 (Situation Report) - ストリーミング対応 ---
+    # --- A. 状況報告 (Situation Report) ---
     if selected_incident_candidate:
         cand = selected_incident_candidate
         
-        # 1. まだレポートが未生成、かつシナリオが正常以外なら生成する
+        should_generate = False
         if "generated_report" not in st.session_state or st.session_state.generated_report is None:
+            should_generate = True
+        elif st.session_state.get("last_report_cand_id") != cand['id']:
+            should_generate = True
+            
+        if should_generate:
             if api_key and selected_scenario != "正常稼働":
                 
                 report_container = st.empty()
-                
                 target_conf = load_config_by_id(cand['id'])
                 
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel("gemma-3-12b-it")
                 
-                # ★修正点: 表示崩れを防ぐための強力なプロンプト
                 prompt = f"""
                 あなたはネットワーク運用監視のプロフェッショナルです。
                 以下の障害インシデントについて、顧客向けの「詳細な状況報告レポート」を作成してください。
@@ -309,51 +321,55 @@ with col_chat:
                 - 対象機器Config: 
                 {target_conf[:1500]} (抜粋)
 
-                【出力フォーマット要件】
-                Markdown形式で出力します。
-                
-                **重要事項:**
-                1. 見出し(###)や太字(**)を使用する場合、**その前後には必ず空白行（改行）を2つ入れてください。** これを守らないと表示が崩れます。
-                2. 箇条書きリストの前にも必ず改行を入れてください。
+                【重要: 出力形式】
+                1. HTMLタグ(brなど)は絶対に使用しないでください。改行はMarkdownの標準的な空行（エンター2回）で行ってください。
+                2. 見出し（###）の前後には必ず空行を入れてください。
                 
                 構成:
                 ### 状況報告：{cand['id']}
                 
                 **1. 障害概要**
-                
-                (ここに概要)
+                (概要記述)
                 
                 **2. 影響**
-                
-                (ここに影響)
+                (影響記述)
                 
                 **3. 詳細情報**
-                
-                (機器名、HAグループ、障害内容、バージョン、設定情報など)
+                (機器情報など)
                 
                 **4. 対応**
-                
                 (対応策)
                 
                 **5. 今後の対応**
-                
-                (今後の予定)
+                (今後)
                 """
                 
                 try:
                     response = model.generate_content(prompt, stream=True)
                     full_text = ""
                     for chunk in response:
-                        full_text += chunk.text
-                        report_container.markdown(full_text)
+                        if chunk.candidates[0].finish_reason == 1: 
+                             pass 
+                        elif chunk.candidates[0].finish_reason == 3: 
+                             full_text = "⚠️ コンテンツが安全フィルターによりブロックされました。別のシナリオを試してください。"
+                             break
+                        else:
+                             full_text += chunk.text
+                             report_container.markdown(full_text)
+                    
+                    if not full_text: full_text = "レポート生成に失敗しました（空の応答）。"
+                    
                     st.session_state.generated_report = full_text
+                    st.session_state.last_report_cand_id = cand['id']
+                    
                 except Exception as e:
-                    st.session_state.generated_report = f"Report Generation Error: {e}"
+                    err_msg = f"Report Generation Error: {str(e)}"
+                    st.session_state.generated_report = err_msg
+                    st.error(err_msg)
             else:
                  st.session_state.generated_report = "監視中... 異常は検知されていません。"
 
-        # 生成済みレポートの表示
-        elif st.session_state.generated_report:
+        if st.session_state.generated_report:
              st.markdown(st.session_state.generated_report)
     
     # --- B. 自動修復 & チャット ---
@@ -380,7 +396,6 @@ with col_chat:
                 st.info("AI Generated Recovery Procedure")
                 st.markdown(st.session_state.remediation_plan)
             
-            # --- 復旧実行エリア ---
             col_exec1, col_exec2 = st.columns(2)
             
             with col_exec1:
@@ -400,7 +415,7 @@ with col_chat:
                             st.write("✅ Verification Completed.")
                             status.update(label="Process Finished", state="complete", expanded=False)
                         
-                        st.success("Remediation Process Finished. Please check the verification logs below.")
+                        st.success("Remediation Process Finished.")
 
             with col_exec2:
                  if st.button("キャンセル"):
@@ -408,7 +423,6 @@ with col_chat:
                     st.session_state.verification_log = None
                     st.rerun()
             
-            # --- 検証結果の表示 ---
             if st.session_state.get("verification_log"):
                 st.markdown("#### 🔎 Post-Fix Verification Logs")
                 st.code(st.session_state.verification_log, language="text")
@@ -421,13 +435,6 @@ with col_chat:
                 else:
                     st.warning("⚠️ Verification indicates potential issues. Please check manually.")
 
-                if st.button("🔄 手動検証 (Manual Verify)"):
-                    with st.spinner("Re-running verification..."):
-                        target_node_obj = TOPOLOGY.get(selected_incident_candidate["id"])
-                        new_log = generate_fake_log_by_ai("正常稼働", target_node_obj, api_key)
-                        st.session_state.verification_log = new_log
-                        st.rerun()
-                        
                 if st.button("デモを終了してリセット"):
                     del st.session_state.remediation_plan
                     st.session_state.verification_log = None
