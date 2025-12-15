@@ -85,7 +85,7 @@ def render_topology(alarms, root_cause_candidates):
             if this_alarm and this_alarm.severity == "WARNING":
                 color = "#fff9c4" # Yellow
             else:
-                color = "#ffcdd2" # Red (Critical or AI determined silent failure)
+                color = "#ffcdd2" # Red
             
             penwidth = "3"
             label += "\n[ROOT CAUSE]"
@@ -242,21 +242,38 @@ with col2: st.metric("📨 処理アラーム数", f"{len(alarms) * 15 if alarms
 with col3: st.metric("🚨 要対応インシデント", f"{len([c for c in analysis_results if c['prob'] > 0.6])}件", "対処が必要")
 st.markdown("---")
 
+# --- データフレーム生成 (★修正箇所) ---
 df_data = []
 for rank, cand in enumerate(analysis_results[:5], 1):
+    # デフォルト
     status = "⚪ 監視中"
     action = "👁️ 静観"
+    
+    # 根本原因 (Root Cause)
     if cand['prob'] > 0.8:
         status = "🔴 危険 (根本原因)"
         action = "🚀 自動修復が可能"
+    # 被疑箇所 (Warning)
     elif cand['prob'] > 0.6:
         status = "🟡 警告 (被疑箇所)"
         action = "🔍 詳細調査を推奨"
     
+    # ★追加: 上位障害による波及 (Secondary)
+    if cand.get('type') == "Network/Secondary":
+        status = "⚫ 応答なし (上位障害)"
+        action = "⛔ 対応不要 (上位復旧待ち)"
+
+    # 表示用テキストの整形
+    candidate_text = f"デバイス: {cand['id']} / 原因: {cand['label']}"
+    
+    # ★追加: 能動的診断の実施有無を明記
+    if cand.get('verification_log'):
+        candidate_text += " [🔍 Active Probe: 応答なし]"
+
     df_data.append({
         "順位": rank,
         "ステータス": status,
-        "根本原因候補": f"デバイス: {cand['id']} / 原因: {cand['label']}",
+        "根本原因候補": candidate_text,
         "リスクスコア": cand['prob'],
         "推奨アクション": action,
         "ID": cand['id'],
@@ -301,7 +318,6 @@ with col_map:
     
     if selected_incident_candidate and selected_incident_candidate["prob"] > 0.6:
         current_root_node = TOPOLOGY.get(selected_incident_candidate["id"])
-        # アラーム重大度 または AI推論に基づく深刻度判定
         if "Hardware/Physical" in selected_incident_candidate["type"] or "Critical" in selected_incident_candidate["type"] or "Silent" in selected_incident_candidate["type"]:
             current_severity = "CRITICAL"
         else:
