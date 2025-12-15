@@ -65,7 +65,9 @@ def render_topology(alarms, root_cause_candidates):
     alarm_map = {a.device_id: a for a in alarms}
     alarmed_ids = set(alarm_map.keys())
     
-    # AI判定結果のマッピング (ID -> Type)
+    root_cause_ids = {c['id'] for c in root_cause_candidates if c['prob'] > 0.6}
+    
+    # AI判定結果のマッピング
     node_status_map = {c['id']: c['type'] for c in root_cause_candidates}
     
     for node_id, node in TOPOLOGY.items():
@@ -79,21 +81,17 @@ def render_topology(alarms, root_cause_candidates):
         vendor = node.metadata.get("vendor")
         if vendor: label += f"\n[{vendor}]"
 
-        # AI判定に基づく色分け
         status_type = node_status_map.get(node_id, "Normal")
         
         if "Hardware/Physical" in status_type or "Critical" in status_type or "Silent" in status_type:
-            # 根本原因 (赤)
             color = "#ffcdd2" 
             penwidth = "3"
             label += "\n[ROOT CAUSE]"
         elif "Network/Unreachable" in status_type or "Network/Secondary" in status_type:
-            # 影響下/到達不能 (グレーまたは薄い赤)
-            color = "#cfd8dc" # Grayish
+            color = "#cfd8dc" 
             fontcolor = "#546e7a"
             label += "\n[Unreachable]"
         elif node_id in alarmed_ids:
-            # アラームあり (黄)
             color = "#fff9c4" 
         
         graph.node(node_id, label=label, fillcolor=color, color='black', penwidth=penwidth, fontcolor=fontcolor)
@@ -245,8 +243,9 @@ with col3: st.metric("🚨 要対応インシデント", f"{len([c for c in anal
 st.markdown("---")
 
 df_data = []
-# 表示件数を少し増やす（影響範囲を見るため）
-for rank, cand in enumerate(analysis_results[:8], 1):
+# ★修正: スライス制限を撤廃 (全件表示)
+# 階層ロジックにより、重要なもの(Tier高)が先頭に来るため、大量にあっても問題ない
+for rank, cand in enumerate(analysis_results, 1):
     status = "⚪ 監視中"
     action = "👁️ 静観"
     
@@ -257,7 +256,6 @@ for rank, cand in enumerate(analysis_results[:8], 1):
         status = "🟡 警告 (被疑箇所)"
         action = "🔍 詳細調査を推奨"
     
-    # ★追加: 上位障害による波及
     if "Network/Unreachable" in cand['type'] or "Network/Secondary" in cand['type']:
         status = "⚫ 応答なし (上位障害)"
         action = "⛔ 対応不要 (上位復旧待ち)"
@@ -265,6 +263,9 @@ for rank, cand in enumerate(analysis_results[:8], 1):
     candidate_text = f"デバイス: {cand['id']} / 原因: {cand['label']}"
     if cand.get('verification_log'):
         candidate_text += " [🔍 Active Probe: 応答なし]"
+    
+    # デバッグ用にTierを表示（本番では消しても良い）
+    # candidate_text += f" (Tier: {cand.get('tier')})"
 
     df_data.append({
         "順位": rank,
@@ -358,7 +359,6 @@ with col_map:
         if res["status"] == "SUCCESS":
             st.markdown("#### 📄 Diagnostic Results")
             with st.container(border=True):
-                # 能動的診断ログの表示
                 if selected_incident_candidate and selected_incident_candidate.get("verification_log"):
                     st.caption("🤖 Active Probe / Verification Log")
                     st.code(selected_incident_candidate["verification_log"], language="text")
