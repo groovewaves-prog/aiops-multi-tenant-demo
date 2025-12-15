@@ -19,6 +19,7 @@ st.set_page_config(page_title="Antigravity Autonomous", page_icon="⚡", layout=
 # 関数定義
 # ==========================================
 def find_target_node_id(topology, node_type=None, layer=None, keyword=None):
+    """トポロジーから条件に合うノードIDを検索"""
     for node_id, node in topology.items():
         if node_type and node.type != node_type: continue
         if layer and node.layer != layer: continue
@@ -31,7 +32,20 @@ def find_target_node_id(topology, node_type=None, layer=None, keyword=None):
         return node_id
     return None
 
+def load_config_by_id(device_id):
+    """configsフォルダから設定ファイルを読み込む"""
+    possible_paths = [f"configs/{device_id}.txt", f"{device_id}.txt"]
+    for path in possible_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+    return "Config file not found."
+
 def render_topology(alarms, root_cause_node, root_severity="CRITICAL"):
+    """トポロジー図の描画"""
     graph = graphviz.Digraph()
     graph.attr(rankdir='TB')
     graph.attr('node', shape='box', style='rounded,filled', fontname='Helvetica')
@@ -105,6 +119,7 @@ with st.sidebar:
 # --- セッション管理 ---
 if "current_scenario" not in st.session_state:
     st.session_state.current_scenario = "正常稼働"
+    st.session_state.last_report_scenario = None 
 
 if st.session_state.current_scenario != selected_scenario:
     st.session_state.current_scenario = selected_scenario
@@ -113,8 +128,8 @@ if st.session_state.current_scenario != selected_scenario:
     st.session_state.live_result = None 
     st.session_state.trigger_analysis = False
     st.session_state.verification_result = None
+    st.session_state.generated_report = None
     if "remediation_plan" in st.session_state: del st.session_state.remediation_plan
-    # シナリオ変更時はベイズエンジンもリセット（初期証拠を入れ直すため）
     if "bayes_engine" in st.session_state: del st.session_state.bayes_engine
     st.rerun()
 
@@ -166,11 +181,9 @@ else:
             alarms = [Alarm(target_device_id, "Memory High", "WARNING")]
             root_severity = "WARNING"
 
-# 2. ベイズエンジン初期化 & 初期証拠注入 (★ここを修正)
+# 2. ベイズエンジン初期化
 if "bayes_engine" not in st.session_state:
     st.session_state.bayes_engine = BayesianRCA(TOPOLOGY)
-    
-    # シナリオ選択の時点で、AIに「アラーム証拠」を与える
     if "BGP" in selected_scenario:
         st.session_state.bayes_engine.update_probabilities("alarm", "BGP Flapping")
     elif "全回線断" in selected_scenario or "両系" in selected_scenario:
@@ -179,7 +192,6 @@ if "bayes_engine" not in st.session_state:
     elif "片系" in selected_scenario:
         st.session_state.bayes_engine.update_probabilities("alarm", "HA Failover")
     elif "FAN" in selected_scenario:
-        # ★追加: FAN故障ならFANアラームが出ているはず
         st.session_state.bayes_engine.update_probabilities("alarm", "Fan Fail")
 
 # 3. コックピット表示
@@ -217,7 +229,6 @@ with col_map:
                 st.write("🔌 Connecting to device...")
                 target_node_obj = TOPOLOGY.get(target_device_id) if target_device_id else None
                 
-                # ここで sanitization が走ります
                 res = run_diagnostic_simulation(selected_scenario, target_node_obj, api_key)
                 st.session_state.live_result = res
                 
@@ -235,43 +246,62 @@ with col_map:
                     status.update(label="Diagnostics Failed", state="error")
             st.rerun()
 
-# === 右カラム: 分析レポート ===
+# === 右カラム: AI Analyst Report (詳細版) ===
 with col_chat:
     st.subheader("📝 AI Analyst Report")
     
     # --- A. 状況報告 (Situation Report) ---
-    # コックピットで選択された行（またはデフォルト1位）の情報を表示
     if selected_incident_candidate:
         cand = selected_incident_candidate
         
-        # 色分け用スタイルの決定
-        alert_color = "#e3f2fd" # Blue (Info)
-        if cand["prob"] > 0.8: alert_color = "#ffebee" # Red (Critical)
-        elif cand["prob"] > 0.4: alert_color = "#fff3e0" # Orange (Warning)
-        
-        st.markdown(f"""
-        <div style="background-color:{alert_color};padding:15px;border-radius:10px;border-left:5px solid #d32f2f;margin-bottom:15px;">
-            <h4 style="margin:0;">状況報告: {cand['id']}</h4>
-            <p style="margin:5px 0;"><strong>障害種別:</strong> {cand['type']}</p>
-            <p style="margin:5px 0;"><strong>AI確信度:</strong> {cand['prob']:.1%}</p>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # 簡易分析コメントの生成
-        analysis_text = ""
-        if "Hardware" in cand["type"] or "Fan" in cand["type"]:
-            analysis_text = "ハードウェアレベルの障害（電源、FAN、ケーブル等）が強く疑われます。ログおよび物理ステータスの確認が必要です。"
-        elif "Config" in cand["type"]:
-            analysis_text = "物理リンクは維持されていますが、設定ミスやプロトコル不整合による通信障害の可能性があります。"
-        else:
-            analysis_text = "複数の要因が考えられます。詳細診断を実行してください。"
-            
-        st.info(f"💡 **AI Analysis:**\n\n{analysis_text}")
+        if "generated_report" not in st.session_state or st.session_state.generated_report is None:
+            if api_key and selected_scenario != "正常稼働":
+                with st.spinner("AI Analyst is writing a detailed report..."):
+                    target_conf = load_config_by_id(cand['id'])
+                    
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel("gemma-3-12b-it")
+                    
+                    prompt = f"""
+                    あなたはネットワーク運用監視のプロフェッショナルです。
+                    以下の障害インシデントについて、顧客向けの「詳細な状況報告レポート」を作成してください。
+                    
+                    【入力情報】
+                    - 発生シナリオ: {selected_scenario}
+                    - 根本原因候補: {cand['id']} ({cand['type']})
+                    - AI確信度: {cand['prob']:.1%}
+                    - 対象機器Config: 
+                    {target_conf[:1500]} (抜粋)
 
+                    【出力フォーマット要件】
+                    以下の見出し構成で出力してください。Markdown形式を利用してください。
+                    
+                    ### 状況報告：{cand['id']} ({cand['type']})
+                    **1. 障害概要**
+                    **2. 影響**
+                    **3. 詳細情報** (機器名、HAグループ、障害内容、バージョン、設定情報など)
+                    **4. 対応**
+                    **5. 今後の対応**
+                    """
+                    
+                    try:
+                        resp = model.generate_content(prompt)
+                        st.session_state.generated_report = resp.text
+                    except Exception as e:
+                        st.session_state.generated_report = f"Report Generation Error: {e}"
+            else:
+                 st.session_state.generated_report = "監視中... 異常は検知されていません。"
+
+        if st.session_state.generated_report:
+            with st.container(border=True):
+                st.markdown(st.session_state.generated_report)
+    
     # --- B. 診断実行結果 (Sanitized Logs) ---
     if st.session_state.live_result:
         res = st.session_state.live_result
         if res["status"] == "SUCCESS":
+            st.markdown("---")
+            st.subheader("🔍 Diagnostic Results")
             with st.expander("📄 診断ログ出力 (🔒 Sanitized)", expanded=True):
                 if st.session_state.verification_result:
                     v = st.session_state.verification_result
@@ -289,18 +319,23 @@ with col_chat:
             if st.button("✨ 修復プランを作成 (Generate Fix)"):
                  if not api_key: st.error("API Key Required")
                  else:
-                    with st.spinner("Generating config..."):
+                    with st.spinner("Generating plan..."):
                         t_node = TOPOLOGY.get(selected_incident_candidate["id"])
-                        cmds = generate_remediation_commands(
+                        # ★ここが重要: 修正されたプロンプトで、手順書(Markdown)が返ってくる
+                        plan_md = generate_remediation_commands(
                             selected_scenario, 
                             f"Identified Root Cause: {selected_incident_candidate['type']}", 
                             t_node, api_key
                         )
-                        st.session_state.remediation_plan = cmds
+                        st.session_state.remediation_plan = plan_md
                         st.rerun()
         
+        # ★ここを修正: st.code ではなく st.markdown で表示
         if "remediation_plan" in st.session_state:
-            st.code(st.session_state.remediation_plan, language="cisco")
+            with st.container(border=True):
+                st.info("AI Generated Recovery Procedure")
+                st.markdown(st.session_state.remediation_plan)
+            
             col_exec1, col_exec2 = st.columns(2)
             with col_exec1:
                 if st.button("🚀 修復実行 (Execute)", type="primary"):
