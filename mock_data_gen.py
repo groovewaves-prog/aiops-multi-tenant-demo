@@ -2,11 +2,11 @@ import pandas as pd
 import random
 
 # 生成するデータ数
-NUM_SAMPLES = 6000 # 少し増やす
+NUM_SAMPLES = 6000 
 
 # ■ 世界の法則（シナリオ定義）
 SCENARIOS = [
-    # 1. WANルーター物理故障 (単体)
+    # 1. WANルーター物理故障
     {
         "root_cause_id": "WAN_ROUTER_01",
         "root_cause_type": "Hardware/Physical",
@@ -37,23 +37,25 @@ SCENARIOS = [
         "weight": 0.1,
         "probabilities": {
             ("alarm", "HA Failover"): 0.90,
+            ("alarm", "Heartbeat Loss"): 0.85, # 追加
             ("ping", "NG"): 0.50,
             ("log", "Power Fail"): 0.80
         }
     },
-    # 4. L2スイッチ FAN故障
+    # 4. L2スイッチ/AP関連障害 (★Connection Lostを追加)
     {
         "root_cause_id": "L2_SW",
         "root_cause_type": "Hardware/Fan",
         "weight": 0.1,
         "probabilities": {
             ("alarm", "Fan Fail"): 0.95,
+            ("alarm", "Connection Lost"): 0.70, # APダウンの兆候として学習させる
             ("log", "High Temperature"): 0.60,
             ("ping", "NG"): 0.05,
             ("log", "System Warning"): 0.80
         }
     },
-    # ★追加 5. 複合クリティカル障害 (電源+FAN同時故障)
+    # 5. 複合クリティカル障害 (電源+FAN同時故障)
     {
         "root_cause_id": "WAN_ROUTER_01",
         "root_cause_type": "Hardware/Critical_Multi_Fail",
@@ -88,7 +90,7 @@ def generate_mock_data():
         
         r_id = scenario['root_cause_id']
         if r_id == "L2_SW":
-            r_id = random.choice(["L2_SW_01", "L2_SW_02"])
+            r_id = random.choice(["L2_SW_01", "L2_SW_02", "AP_01", "AP_02"]) # APも混ぜる
             
         root_key = f"{r_id}::{scenario['root_cause_type']}"
         
