@@ -36,6 +36,105 @@ def display_company(tenant_id: str) -> str:
         return tenant_id
     return f"{tenant_id}社"
 
+def _node_type(node) -> str:
+    try:
+        return str(getattr(node, "type", "UNKNOWN"))
+    except Exception:
+        return "UNKNOWN"
+
+def _node_layer(node) -> int:
+    try:
+        return int(getattr(node, "layer", 999))
+    except Exception:
+        return 999
+
+def _find_target_node_id(topology: dict, node_type: str | None = None, layer: int | None = None, keyword: str | None = None) -> str | None:
+    """トポロジから対象ノードIDを1つ選ぶ（最初の app.py の挙動に合わせた最小実装）"""
+    for node_id, node in topology.items():
+        if node_type and _node_type(node) != node_type:
+            continue
+        if layer is not None and _node_layer(node) != layer:
+            continue
+        if keyword and keyword not in str(node_id):
+            continue
+        return node_id
+    return None
+
+def _make_alarms(topology: dict, selected_scenario: str):
+    """シナリオ文字列とトポロジ機器をマッチさせてアラームを生成（最初の app.py に準拠）"""
+    alarms = []
+    # Live はここでは生成しない
+    if "Live" in selected_scenario:
+        return alarms
+
+    if "WAN全回線断" in selected_scenario:
+        rid = _find_target_node_id(topology, node_type="ROUTER")
+        if rid:
+            return simulate_cascade_failure(rid, topology)
+        return alarms
+
+    if "FW片系障害" in selected_scenario:
+        fid = _find_target_node_id(topology, node_type="FIREWALL")
+        if fid:
+            return [Alarm(fid, "Heartbeat Loss", "WARNING")]
+        return alarms
+
+    if "L2SWサイレント障害" in selected_scenario:
+        target = "L2_SW_01"
+        if target not in topology:
+            target = _find_target_node_id(topology, keyword="L2_SW")
+        if target and target in topology:
+            child_nodes = [nid for nid, n in topology.items() if getattr(n, "parent_id", None) == target]
+            return [Alarm(child, "Connection Lost", "CRITICAL") for child in child_nodes]
+        return alarms
+
+    if "複合障害" in selected_scenario:
+        rid = _find_target_node_id(topology, node_type="ROUTER")
+        if rid:
+            return [Alarm(rid, "Power Supply 1 Failed", "CRITICAL"), Alarm(rid, "Fan Fail", "WARNING")]
+        return alarms
+
+    if "同時多発" in selected_scenario:
+        fw = _find_target_node_id(topology, node_type="FIREWALL")
+        ap = _find_target_node_id(topology, node_type="ACCESS_POINT")
+        if fw:
+            alarms.append(Alarm(fw, "Heartbeat Loss", "WARNING"))
+        if ap:
+            alarms.append(Alarm(ap, "Connection Lost", "CRITICAL"))
+        return alarms
+
+    # それ以外：[WAN]/[FW]/[L2SW] を type にマップ
+    target_device_id = None
+    if "[WAN]" in selected_scenario:
+        target_device_id = _find_target_node_id(topology, node_type="ROUTER")
+    elif "[FW]" in selected_scenario:
+        target_device_id = _find_target_node_id(topology, node_type="FIREWALL")
+    elif "[L2SW]" in selected_scenario:
+        target_device_id = _find_target_node_id(topology, node_type="SWITCH", layer=4)
+
+    if not target_device_id:
+        return alarms
+
+    if "電源障害：片系" in selected_scenario:
+        return [Alarm(target_device_id, "Power Supply 1 Failed", "WARNING")]
+
+    if "電源障害：両系" in selected_scenario:
+        # ルータ等はカスケード、FWは単体down
+        if "FW" in str(target_device_id):
+            return [Alarm(target_device_id, "Power Supply: Dual Loss (Device Down)", "CRITICAL")]
+        return simulate_cascade_failure(target_device_id, topology, "Power Supply: Dual Loss (Device Down)")
+
+    if "BGP" in selected_scenario:
+        return [Alarm(target_device_id, "BGP Flapping", "WARNING")]
+
+    if "FAN" in selected_scenario:
+        return [Alarm(target_device_id, "Fan Fail", "WARNING")]
+
+    if "メモリ" in selected_scenario:
+        return [Alarm(target_device_id, "Memory High", "WARNING")]
+
+    return alarms
+
 def _status_from_alarms(selected_scenario: str, alarms) -> str:
     """全社一覧の状態（停止/劣化/要注意/正常）を判定する。
     モックのため簡易ルールだが、“停止クラス”のシナリオは優先して停止に寄せる。
@@ -125,7 +224,7 @@ def _build_company_rows(selected_scenario: str):
         paths = get_paths(tenant_id, network_id)
         topo = load_topology(paths.topology_path)
 
-        alarms = simulate_cascade_failure(topo, selected_scenario)
+        alarms = _make_alarms(topo, selected_scenario)
         alarm_count = len(alarms)
 
         status = _status_from_alarms(selected_scenario, alarms)
