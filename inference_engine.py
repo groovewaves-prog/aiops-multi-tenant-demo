@@ -29,7 +29,7 @@ class InferenceEngine:
         genai.configure(api_key=api_key)
         
         # コストと精度のバランスが良いモデルを選択
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        self.model = genai.GenerativeModel('gemma-3-12b-it')
 
     def _load_topology(self, path: str) -> Dict:
         """JSONファイルからトポロジー情報を読み込む"""
