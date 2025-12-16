@@ -242,7 +242,7 @@ with st.sidebar:
 _render_all_companies_view(selected_scenario)
 
 st.markdown("---")
-    if api_key: st.success("API Connected")
+if api_key: st.success("API Connected")
     else:
         st.warning("API Key Missing")
         user_key = st.text_input("Google API Key", type="password")
