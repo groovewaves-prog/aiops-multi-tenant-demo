@@ -1,15 +1,13 @@
-from pathlib import Path
-
-fixed_path = Path("/mnt/data/inference_engine_fixed.py")
-fixed_path.write_text("""import json
+import json
 import os
 import re
-import google.generativeai as genai
 from enum import Enum
 from typing import List, Dict, Any, Optional
 
+import google.generativeai as genai
+
 # ==========================================================
-# AIOpsの判定ステータス
+# AIOps health status
 # ==========================================================
 class HealthStatus(Enum):
     NORMAL = "GREEN"
@@ -18,18 +16,18 @@ class HealthStatus(Enum):
 
 
 class LogicalRCA:
-    \"""
+    """
     LogicalRCA:
       - LLM によるコンフィグ解釈（ベンダ差分の吸収）
       - トポロジー文脈（親子関係）を用いたカスケード抑制
       - “冗長が効いてるなら黄色、止まってるなら赤” を優先
-    \"""
+    """
 
     def __init__(self, topology, config_dir: str = "./configs"):
-        \"""
+        """
         :param topology: トポロジー辞書オブジェクト または JSONファイルパス(str)
         :param config_dir: コンフィグファイルが格納されているディレクトリ
-        \"""
+        """
         if isinstance(topology, str):
             self.topology = self._load_topology(topology)
         elif isinstance(topology, dict):
@@ -66,10 +64,10 @@ class LogicalRCA:
         return {}
 
     def _get_psu_count(self, device_id: str, default: int = 1) -> int:
-        \"""
+        """
         topology.json の metadata.hw_inventory.psu_count を参照。
         存在しない場合は default（1）を返す。
-        \"""
+        """
         md = self._get_metadata(device_id)
         hw = md.get("hw_inventory", {}) if isinstance(md, dict) else {}
         try:
@@ -82,7 +80,7 @@ class LogicalRCA:
     # LLM init
     # ----------------------------
     def _ensure_api_configured(self) -> bool:
-        \"""APIキーの設定を確認・初期化（遅延評価）\"""
+        """APIキーの設定を確認・初期化（遅延評価）"""
         if self._api_configured:
             return True
 
@@ -103,14 +101,14 @@ class LogicalRCA:
     # IO
     # ----------------------------
     def _load_topology(self, path: str) -> Dict:
-        \"""JSONファイルからトポロジー情報を読み込む\"""
+        """JSONファイルからトポロジー情報を読み込む"""
         if not os.path.exists(path):
             return {}
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
 
     def _read_config(self, device_id: str) -> str:
-        \"""デバイスIDに対応するコンフィグファイルを読み込む\"""
+        """デバイスIDに対応するコンフィグファイルを読み込む"""
         config_path = os.path.join(self.config_dir, f"{device_id}.txt")
         if os.path.exists(config_path):
             try:
@@ -124,25 +122,25 @@ class LogicalRCA:
     # Sanitization
     # ----------------------------
     def _sanitize_text(self, text: str) -> str:
-        \"""機密情報のサニタイズ処理\"""
-        text = re.sub(r'(encrypted-password\\s+)"[^"]+"', r'\\1"********"', text)
-        text = re.sub(r"(password|secret)\\s+(\\d)\\s+\\S+", r"\\1 \\2 ********", text)
-        text = re.sub(r"(username\\s+\\S+\\s+secret)\\s+\\d\\s+\\S+", r"\\1 5 ********", text)
-        text = re.sub(r"(snmp-server community)\\s+\\S+", r"\\1 ********", text)
+        """機密情報のサニタイズ処理"""
+        text = re.sub(r'(encrypted-password\s+)"[^"]+"', r'\1"********"', text)
+        text = re.sub(r"(password|secret)\s+(\d)\s+\S+", r"\1 \2 ********", text)
+        text = re.sub(r"(username\s+\S+\s+secret)\s+\d\s+\S+", r"\1 5 ********", text)
+        text = re.sub(r"(snmp-server community)\s+\S+", r"\1 ********", text)
         return text
 
     # ==========================================================
     # Public API
     # ==========================================================
     def analyze(self, alarms: List) -> List[Dict[str, Any]]:
-        \"""
+        """
         アラームリストを分析して根本原因候補を返す（辞書形式）
 
         改善ポイント:
           1) 同一デバイスの複数アラームを“まとめて”判断
           2) 親が落ちているときの子の Unreachable を根本原因扱いしない
           3) “冗長OKなら黄色、停止なら赤” をローカル安全ルールで確定
-        \"""
+        """
         if not alarms:
             return [{
                 "id": "SYSTEM",
@@ -215,7 +213,7 @@ class LogicalRCA:
     # Core decision function
     # ==========================================================
     def analyze_redundancy_depth(self, device_id: str, alerts: List[str]) -> Dict[str, Any]:
-        \"""
+        """
         冗長性深度とサービス影響を判定する。
 
         ローカル安全ルールで“確定できるもの”は確定し、
@@ -225,7 +223,7 @@ class LogicalRCA:
         # このルールは運用上の安全性を保証するために存在します。
         # 将来、インベントリ＋過去の証跡が十分に利用できるようになったら、
         # この判断はAIに委譲すべきです。
-        \"""
+        """
         if not alerts:
             return {
                 "status": HealthStatus.NORMAL,
@@ -275,7 +273,7 @@ class LogicalRCA:
         raw_config = self._read_config(device_id)
         safe_config = self._sanitize_text(raw_config)
 
-        prompt = f\"\"\"
+        prompt = f"""
 あなたはネットワーク運用のエキスパートAIです。
 以下の情報に基づき、現在発生しているアラートが「サービス停止(CRITICAL)」を引き起こしているか、
 それとも「冗長機能によりサービスは維持されている(WARNING)」状態かを判定してください。
@@ -304,12 +302,12 @@ class LogicalRCA:
 
 ### 出力フォーマット
 以下のJSON形式のみを出力してください（Markdownコードブロックは不要）。
-{{
+{
   "status": "NORMAL|WARNING|CRITICAL",
   "reason": "判定理由を簡潔に記述",
   "impact_type": "NONE|DEGRADED|REDUNDANCY_LOST|OUTAGE|UNKNOWN"
-}}
-\"\"\"
+}
+"""
 
         try:
             response = self.model.generate_content(
@@ -346,26 +344,3 @@ class LogicalRCA:
                 "reason": f"AI Analysis Failed: {str(e)}",
                 "impact_type": "AI_ERROR"
             }
-
-
-if __name__ == "__main__":
-    TEST_TOPOLOGY = "topology.json"
-    TEST_CONFIG_DIR = "./configs"
-
-    engine = LogicalRCA(TEST_TOPOLOGY, TEST_CONFIG_DIR)
-
-    class _Alarm:
-        def __init__(self, device_id, message):
-            self.device_id = device_id
-            self.message = message
-
-    test_alarms = [
-        _Alarm("WAN_ROUTER_01", "Power Supply: Dual Loss (Device Down)"),
-        _Alarm("FW_01_PRIMARY", "Unreachable"),
-        _Alarm("CORE_SW_01", "Unreachable"),
-    ]
-
-    print(json.dumps(engine.analyze(test_alarms), ensure_ascii=False, indent=2))
-""", encoding="utf-8")
-
-str(fixed_path), fixed_path.stat().st_size
