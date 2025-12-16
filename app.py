@@ -4,6 +4,7 @@ import os
 import time
 import google.generativeai as genai
 import json
+import re
 import pandas as pd
 from google.api_core import exceptions as google_exceptions
 
@@ -346,6 +347,82 @@ def load_config_by_id(device_id):
             except Exception:
                 pass
     return "Config file not found."
+
+# --- Config sanitization & summary (pre-LLM) ---
+
+_IPV4_RE = re.compile(r"\b(\d{1,3}\.\d{1,3}\.\d{1,3})\.(\d{1,3})(/\d{1,2})?\b")
+_ENC_PW_RE = re.compile(r"(encrypted-password\s+)([\"']?)[^\"';\n]+([\"']?)", re.IGNORECASE)
+
+def sanitize_config_text(raw_text: str) -> str:
+    """Sanitize sensitive tokens BEFORE any AI prompt usage.
+    - Redact encrypted-password values
+    - Mask IPv4 last octet
+    """
+    if not raw_text:
+        return raw_text
+    text = raw_text
+
+    # Redact encrypted-password (do not leak even hashed material)
+    def _pw_sub(m):
+        return f"{m.group(1)}\"***REDACTED***\""
+    text = _ENC_PW_RE.sub(_pw_sub, text)
+
+    # Mask IPv4 addresses (last octet)
+    def _ip_sub(m):
+        return f"{m.group(1)}.xxx{m.group(3) or ''}"
+    text = _IPV4_RE.sub(_ip_sub, text)
+
+    return text
+
+def build_config_summary(sanitized_text: str) -> dict:
+    """Best-effort extractor for operator-friendly summary.
+    Returns only sanitized fields.
+    """
+    summary = {
+        "os_version": None,
+        "host_name": None,
+        "interfaces": [],
+        "zones": [],
+    }
+    if not sanitized_text:
+        return summary
+
+    m = re.search(r"\bversion\s+([^;\n]+)", sanitized_text)
+    if m:
+        summary["os_version"] = m.group(1).strip()
+
+    m = re.search(r"\bhost-name\s+([^;\s\n]+)", sanitized_text)
+    if m:
+        summary["host_name"] = m.group(1).strip()
+
+    # Interface + address (very simple parsing)
+    for im in re.finditer(r"\b(ge-\d+/\d+/\d+)\b[\s\S]{0,220}?\baddress\s+([^;\s\n]+)", sanitized_text):
+        if_name = im.group(1)
+        addr = im.group(2)
+        summary["interfaces"].append({"name": if_name, "address": addr})
+
+    # Zones
+    for zm in re.finditer(r"security-zone\s+([^\s\{\n]+)", sanitized_text):
+        z = zm.group(1).strip()
+        if z not in summary["zones"]:
+            summary["zones"].append(z)
+
+    return summary
+
+def load_config_sanitized(device_id: str) -> dict:
+    """Load config and return a sanitized dict with summary + excerpt."""
+    raw = load_config_by_id(device_id)
+    sanitized = sanitize_config_text(raw)
+    summary = build_config_summary(sanitized)
+
+    excerpt = sanitized[:1500] if isinstance(sanitized, str) else ""
+    return {
+        "device_id": device_id,
+        "summary": summary,
+        "excerpt": excerpt,
+        "available": (raw != "Config file not found."),
+    }
+
 
 def generate_content_with_retry(model, prompt, stream=True, retries=3):
     """503エラー対策のリトライ付き生成関数"""
@@ -775,7 +852,7 @@ with col_chat:
                 if st.button("📝 詳細レポートを作成 (Generate Report)"):
                     
                     report_container = st.empty()
-                    target_conf = load_config_by_id(cand['id'])
+                    cfg = load_config_sanitized(cand['id'])
                     
                     genai.configure(api_key=api_key)
                     model = genai.GenerativeModel("gemma-3-12b-it")
@@ -795,8 +872,14 @@ with col_chat:
                     システムはアラームだけでなく、以下の能動的な確認を行いました。この内容を「対応」や「特定根拠」に含めてください。
                     {verification_context}
 
-                    - 対象機器Config: 
-                    {target_conf[:1500]} (抜粋)
+                    - 対象機器Config（秘匿化済み・要点）:
+                    OS: {cfg['summary'].get('os_version')}
+                    Host: {cfg['summary'].get('host_name')}
+                    Zones: {', '.join(cfg['summary'].get('zones') or [])}
+                    IFs: {', '.join([f"{i['name']}={i['address']}" for i in (cfg['summary'].get('interfaces') or [])])}
+
+                    - 対象機器Config（秘匿化済み・抜粋）:
+                    {cfg['excerpt']}
 
                     【重要: 出力形式】
                     1. HTMLタグ(brなど)は絶対に使用しないでください。改行はMarkdownの標準的な空行（エンター2回）で行ってください。
