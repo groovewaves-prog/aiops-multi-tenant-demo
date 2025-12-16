@@ -2,9 +2,14 @@
 """
 Tenant/Network Registry (minimal + future-proof)
 
-- Keep A社の topology.json はそのまま（変更不要）
-- Tenant/Network を UI で切替できるようにする
-- 将来の多数ネットワーク（CMDB/DB/S3/Git）にも差し替えやすい入口を用意
+Canonical layout:
+  ./tenants/<TENANT>/networks/<NETWORK>/topology.json
+  ./tenants/<TENANT>/networks/<NETWORK>/configs/
+
+This module centralizes:
+- tenant/network discovery
+- topology path + config dir resolution
+- topology loading
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ def _tenants_root() -> Path:
 def list_tenants() -> List[str]:
     troot = _tenants_root()
     if not troot.exists():
-        return ["A", "B"]  # fallback
+        return ["A", "B"]
     tenants = sorted([p.name for p in troot.iterdir() if p.is_dir() and not p.name.startswith(".")])
     return tenants or ["A", "B"]
 
@@ -49,24 +54,9 @@ def list_networks(tenant_id: str) -> List[str]:
 
 
 def get_paths(tenant_id: str, network_id: str) -> TenantNetworkPaths:
-    """
-    Canonical layout:
-      ./tenants/<TENANT>/networks/<NETWORK>/topology.json
-      ./tenants/<TENANT>/networks/<NETWORK>/configs/
-    Backward compatibility:
-      A -> ./topology.json  + ./configs
-      B -> ./topology_b.json + ./configs_b
-    """
-    troot = _tenants_root()
-    topo = troot / tenant_id / "networks" / network_id / "topology.json"
-    cfg = troot / tenant_id / "networks" / network_id / "configs"
-    if topo.exists():
-        return TenantNetworkPaths(tenant_id, network_id, topo, cfg)
-
-    root = _project_root()
-    if tenant_id.upper() == "B":
-        return TenantNetworkPaths(tenant_id, network_id, root / "topology_b.json", root / "configs_b")
-    return TenantNetworkPaths(tenant_id, network_id, root / "topology.json", root / "configs")
+    topo = _tenants_root() / tenant_id / "networks" / network_id / "topology.json"
+    cfg = _tenants_root() / tenant_id / "networks" / network_id / "configs"
+    return TenantNetworkPaths(tenant_id, network_id, topo, cfg)
 
 
 def topology_mtime(path: Path) -> float:
