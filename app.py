@@ -384,7 +384,7 @@ with col_map:
         current_root_node = topology.get(target_device_id)
         current_severity = root_severity
 
-    st.graphviz_chart(render_topology(alarms, analysis_results), use_container_width=True)
+    st.graphviz_chart(render_topology(topology, alarms, analysis_results), use_container_width=True)
 
     st.markdown("---")
     st.subheader("🛠️ Auto-Diagnostics")
