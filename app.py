@@ -80,12 +80,31 @@ def _make_alarms(topology: dict, selected_scenario: str):
         return alarms
 
     if "L2SWサイレント障害" in selected_scenario:
-        target = "L2_SW_01"
-        if target not in topology:
+        # Tenantごとの命名差（L2_SW_01 / L2_SW_B01 など）に耐えるよう、型/Layerで探索します。
+        target = _find_target_node_id(topology, node_type="SWITCH", layer=2, keyword="L2")
+        if not target:
             target = _find_target_node_id(topology, keyword="L2_SW")
+        if not target:
+            target = _find_target_node_id(topology, node_type="SWITCH")
+
         if target and target in topology:
+            # 本来は「L2配下の端末(AP等)で症状が出る」想定。直下childが取れない場合もあるのでフォールバックします。
             child_nodes = [nid for nid, n in topology.items() if getattr(n, "parent_id", None) == target]
-            return [Alarm(child, "Connection Lost", "CRITICAL") for child in child_nodes]
+
+            if not child_nodes:
+                # 直下にぶら下がりが取れない/親子付与がない場合は、APを症状ノードとして使う（デモ安全策）
+                child_nodes = [
+                    nid for nid, n in topology.items()
+                    if str(getattr(n, "type", "")).upper() in ("ACCESS_POINT", "AP")
+                ]
+
+            if child_nodes:
+                # 端末が多い将来を想定し、デモでは最大4台までに抑制（RCAは上位原因に集約される想定）
+                return [Alarm(child, "Connection Lost", "CRITICAL") for child in child_nodes[:4]]
+
+            # それでも対象が作れない場合は、L2自体に「疑い」を置いてUIが壊れないようにする
+            return [Alarm(target, "Silent Degradation Suspected", "WARNING")]
+
         return alarms
 
     if "複合障害" in selected_scenario:
