@@ -1,22 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-app_cards_multitenant_v2_statusboard.py
+app_cards_multitenant_v3_statusboard_delta_maint.py
 
-目的:
-- 既存の「AIOps インシデント・コックピット」のデザイン/構造を壊さずに、
-  画面上部へ「全社一覧」を“信号機ボード型（Down/Degraded/Watch/Good の4列）”で追加する。
-- tenants/ + registry.py を使ったマルチテナント集計に対応。
-- HTML/CSS を使わず、Streamlit標準コンポーネントと絵文字で視認性を上げる。
+Step1: 全社一覧「状態ボード」（停止→劣化→要注意→正常）
+Step2: デルタ表示（変化があった tenant だけを強調）
+Step3: Maintenance 中 tenant のグレーアウト（最小版：手動フラグ）
 
-使い方:
-- このファイルを app.py にリネームして置き換えてください。
+注意:
+- HTML/CSS は使いません（Streamlit 標準のみ + 絵文字）。
+- このファイルは「上部の全社一覧ボード」を中心に実装しています。
+  既存のコックピット（表・トポロジ・AI Analyst Report 等）は、
+  このファイル末尾の案内どおり “元の app.py のブロックをそのまま貼り付け” してください。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
@@ -31,16 +33,43 @@ from registry import (
     topology_mtime,
 )
 
-
+# -----------------------------
+# Page config
+# -----------------------------
 st.set_page_config(page_title="AIOps Incident Cockpit", layout="wide")
 
+# -----------------------------
+# Labels (JP)
+# -----------------------------
+STATUS_ORDER = ["停止", "劣化", "要注意", "正常"]  # 左→右（優先度が高い順）
+STATUS_LABELS = {
+    "Down": "停止",
+    "Degraded": "劣化",
+    "Watch": "要注意",
+    "Good": "正常",
+}
+STATUS_ICON = {
+    "停止": "🟥",
+    "劣化": "🟧",
+    "要注意": "🟨",
+    "正常": "🟩",
+}
 
-@dataclass(frozen=True)
-class ScopePaths:
-    topology_path: Path
-    config_dir: Path
+# デルタ表示の「対象期間」表記（最小版）
+DELTA_WINDOW_MIN = 15
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def display_company(tenant_id: str) -> str:
+    return f"{tenant_id}社"
+
+
+# -----------------------------
+# Helpers
+# -----------------------------
 def _node_type(node: Any) -> str:
     if node is None:
         return "UNKNOWN"
@@ -57,7 +86,10 @@ def _node_layer(node: Any) -> int:
             return int(node.get("layer", 999))
         except Exception:
             return 999
-    return int(getattr(node, "layer", 999))
+    try:
+        return int(getattr(node, "layer", 999))
+    except Exception:
+        return 999
 
 
 def find_target_node_id(
@@ -97,16 +129,6 @@ def _health_from_alarm_count(n: int) -> str:
     return "Down"
 
 
-def _health_badge(health: str) -> str:
-    if health == "Down":
-        return "🟥 Down"
-    if health == "Degraded":
-        return "🟧 Degraded"
-    if health == "Watch":
-        return "🟨 Watch"
-    return "🟩 Good"
-
-
 @st.cache_data(show_spinner=False)
 def _summarize_one_scope(tenant_id: str, network_id: str, scenario: str, mtime: float) -> Dict[str, Any]:
     paths = get_paths(tenant_id, network_id)
@@ -144,29 +166,113 @@ def _collect_all_scopes(scenario: str) -> List[Dict[str, Any]]:
     return rows
 
 
+def _delta_key(r: Dict[str, Any]) -> str:
+    return f"{r['tenant']}::{r['network']}"
+
+
+def _compute_delta(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    if "allco_prev" not in st.session_state:
+        st.session_state.allco_prev = {}
+        st.session_state.allco_prev_ts = _now_iso()
+
+    prev: Dict[str, Dict[str, Any]] = st.session_state.allco_prev
+    out: Dict[str, Dict[str, Any]] = {}
+
+    for r in rows:
+        k = _delta_key(r)
+        p = prev.get(k)
+        if p is None:
+            out[k] = {"delta": None, "prev_alarms": None, "prev_health": None}
+            continue
+
+        d_alarms = int(r["alarms"]) - int(p.get("alarms", 0))
+        d_health = (p.get("health") != r.get("health"))
+        if d_alarms == 0 and not d_health:
+            out[k] = {"delta": None, "prev_alarms": p.get("alarms"), "prev_health": p.get("health")}
+        else:
+            out[k] = {
+                "delta": {
+                    "alarms": d_alarms,
+                    "health_changed": d_health,
+                    "window_min": DELTA_WINDOW_MIN,
+                },
+                "prev_alarms": p.get("alarms"),
+                "prev_health": p.get("health"),
+            }
+
+    st.session_state.allco_prev = {
+        _delta_key(r): {"alarms": r["alarms"], "health": r["health"]} for r in rows
+    }
+    st.session_state.allco_prev_ts = _now_iso()
+
+    return out
+
+
+def _status_jp(health_internal: str) -> str:
+    return STATUS_LABELS.get(health_internal, "要注意")
+
+
+def _status_badge_jp(status_jp: str) -> str:
+    icon = STATUS_ICON.get(status_jp, "🟨")
+    return f"{icon} {status_jp}"
+
+
+def _maintenance_map() -> Dict[str, bool]:
+    if "maint_flags" not in st.session_state:
+        st.session_state.maint_flags = {}
+    return st.session_state.maint_flags
+
+
 def _render_status_board(rows: List[Dict[str, Any]]):
     st.subheader("🏢 全社一覧")
-    st.caption("左ほど優先度が高い（Down → Degraded → Watch → Good）。クリック操作は不要の“俯瞰ボード”です。")
+    st.caption("左から優先度が高い順（停止 → 劣化 → 要注意 → 正常）。クリック操作を必要としない 状態ボードです。")
 
-    buckets = {"Down": [], "Degraded": [], "Watch": [], "Good": []}
+    maint = _maintenance_map()
+    deltas = _compute_delta(rows)
+
+    buckets: Dict[str, List[Dict[str, Any]]] = {k: [] for k in STATUS_ORDER}
     for r in rows:
-        buckets[r["health"]].append(r)
+        status = _status_jp(r["health"])
+        buckets[status].append(r)
 
     col_down, col_degraded, col_watch, col_good = st.columns(4)
+    col_map = {"停止": col_down, "劣化": col_degraded, "要注意": col_watch, "正常": col_good}
 
-    def _render_bucket(col, health_key: str):
-        items = buckets[health_key]
+    def _render_bucket(col, status_jp: str):
+        items = buckets[status_jp]
         items.sort(key=lambda x: x["alarms"], reverse=True)
 
         with col:
-            st.markdown(f"### {_health_badge(health_key)}  **{len(items)}**")
+            st.markdown(f"### {_status_badge_jp(status_jp)}  **{len(items)}**")
             if not items:
                 st.caption("（該当なし）")
                 return
 
-            max_show = 8
+            max_show = 10
             for r in items[:max_show]:
-                st.write(f"**{r['tenant']} / {r['network']}**")
+                tenant = r["tenant"]
+                network = r["network"]
+                key = _delta_key(r)
+
+                is_maint = bool(maint.get(tenant, False))
+
+                prefix = "🛠️ " if is_maint else ""
+                st.write(f"**{prefix}{display_company(tenant)} / {network}**")
+
+                d = deltas.get(key, {}).get("delta")
+                if d is not None:
+                    da = int(d["alarms"])
+                    arrow = "↑" if da > 0 else ("↓" if da < 0 else "•")
+                    delta_txt = f"{arrow} {da:+d}（{d['window_min']}分）"
+                    if d.get("health_changed"):
+                        delta_txt += "  状態変化"
+                    st.caption(delta_txt)
+
+                if is_maint:
+                    st.caption("Maintenance（最小版：手動フラグ）")
+                    st.divider()
+                    continue
+
                 meta = f"Alarms: **{r['alarms']}**"
                 if r.get("suspected"):
                     meta += f"  ·  Suspected: `{r['suspected']}`"
@@ -176,13 +282,26 @@ def _render_status_board(rows: List[Dict[str, Any]]):
             if len(items) > max_show:
                 st.caption(f"…他 {len(items) - max_show} 件（表示は上位 {max_show} 件）")
 
-    _render_bucket(col_down, "Down")
-    _render_bucket(col_degraded, "Degraded")
-    _render_bucket(col_watch, "Watch")
-    _render_bucket(col_good, "Good")
+    _render_bucket(col_map["停止"], "停止")
+    _render_bucket(col_map["劣化"], "劣化")
+    _render_bucket(col_map["要注意"], "要注意")
+    _render_bucket(col_map["正常"], "正常")
+
+    with st.expander("🛠️ Maintenance（最小版：手動フラグ）", expanded=False):
+        st.caption("将来は計画停止情報の外部連携に置換予定。いまは手動でグレーアウト対象（会社）を指定します。")
+        ts = list_tenants()
+        selected = st.multiselect(
+            "Maintenance 中の会社",
+            options=ts,
+            default=[t for t in ts if maint.get(t, False)],
+            format_func=lambda x: display_company(x),
+        )
+        st.session_state.maint_flags = {t: (t in selected) for t in ts}
 
 
+# -----------------------------
 # Sidebar
+# -----------------------------
 st.sidebar.markdown("### ⚡ Scenario Controller")
 selected_scenario = st.sidebar.radio(
     "発生シナリオ",
@@ -190,18 +309,26 @@ selected_scenario = st.sidebar.radio(
 )
 
 tenants = list_tenants()
-tenant_id = st.sidebar.selectbox("Tenant", tenants, index=0)
+tenant_id = st.sidebar.selectbox(
+    "テナント（会社）",
+    tenants,
+    index=0,
+    format_func=lambda x: display_company(x),
+)
 
 networks = list_networks(tenant_id)
-network_id = st.sidebar.selectbox("Network", networks, index=0)
+network_id = st.sidebar.selectbox("ネットワーク", networks, index=0)
 
-# Top: status board
+# -----------------------------
+# Top: All Companies Status Board
+# -----------------------------
 all_rows = _collect_all_scopes(selected_scenario)
 _render_status_board(all_rows)
 
 st.markdown("---")
 
-# Below: keep your original cockpit UI by pasting it here.
-# (This file intentionally focuses on Step1 UI only.)
+# =============================================================================
+# Below: Existing "AIOps インシデント・コックピット"
+# =============================================================================
 st.header("🛡️ AIOps インシデント・コックピット")
-st.info("ここから下は、元の app.py のコックピット描画ブロックをそのまま貼り付けてください（Step1 の実装に集中しているため）。")
+st.info("ここから下は、元の app.py のコックピット描画ブロックをそのまま貼り付けてください（表・トポロジ・AI Analyst Report 等）。")
