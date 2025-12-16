@@ -241,7 +241,7 @@ with st.sidebar:
     selected_scenario = st.radio("発生シナリオ:", SCENARIO_MAP[selected_category])
 _render_all_companies_view(selected_scenario)
 
-    st.markdown("---")
+st.markdown("---")
     if api_key: st.success("API Connected")
     else:
         st.warning("API Key Missing")
