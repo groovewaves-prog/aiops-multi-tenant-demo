@@ -16,7 +16,7 @@ from verifier import verify_log_content, format_verification_report
 from inference_engine import LogicalRCA
 
 # ==========================================================
-# Tenant/Network selection (minimal multi-tenant support)
+# Tenant/Network selection (multi-tenant: switch view only)
 # ==========================================================
 def _reset_for_scope_change():
     """Reset session state that must not leak across tenant/network."""
@@ -69,7 +69,6 @@ def _load_topology_cached(topology_path_str: str, mtime: float):
 
 tenant_id, network_id = _get_scope()
 paths = get_paths(tenant_id, network_id)
-
 topology = _load_topology_cached(str(paths.topology_path), topology_mtime(paths.topology_path))
 config_dir = str(paths.config_dir)
 
@@ -169,6 +168,125 @@ def render_topology(topology, alarms, root_cause_candidates):
 
 # --- UI構築 ---
 st.title("⚡ Antigravity Autonomous Agent")
+
+# ==========================================================
+# All-Companies Summary (Top N, no alarm flood)
+# ==========================================================
+@st.cache_data(show_spinner=False)
+def _summarize_scope(tenant_id: str, network_id: str, scenario_name: str, topo_mtime: float):
+    """
+    Lightweight summary for a tenant/network.
+    - generates alarms for the given scenario
+    - runs LogicalRCA to get top suspected node (cheap at this demo scale)
+    """
+    p = get_paths(tenant_id, network_id)
+    topo = load_topology(p.topology_path)
+    cfg_dir = str(p.config_dir)
+
+    # alarm generation mirrors the main logic (minimal subset)
+    alarms_local = []
+    target_id = None
+
+    if "WAN全回線断" in scenario_name:
+        target_id = find_target_node_id(topo, node_type="ROUTER")
+        if target_id:
+            alarms_local = simulate_cascade_failure(target_id, topo)
+    elif "Firewall電源断" in scenario_name or "Firewall電源" in scenario_name:
+        target_id = find_target_node_id(topo, node_type="FIREWALL")
+        if target_id:
+            alarms_local = simulate_cascade_failure(target_id, topo, "Power Supply: Dual Loss (Device Down)")
+    elif "Access SW" in scenario_name or "L2" in scenario_name:
+        target_id = find_target_node_id(topo, node_type="SWITCH", layer=4)
+        if target_id:
+            alarms_local = simulate_cascade_failure(target_id, topo, "Link Down")
+    elif "Normal" in scenario_name or "平常" in scenario_name:
+        alarms_local = []
+
+    # RCA
+    suspected = None
+    try:
+        rca = LogicalRCA(topo, config_dir=cfg_dir)
+        results = rca.run_rca(alarms_local)
+        if isinstance(results, list) and results:
+            suspected = results[0]
+    except Exception:
+        # keep summary robust; if RCA fails, we still show counts
+        suspected = None
+
+    # Health grading (simple, flood-safe)
+    cnt = len(alarms_local)
+    if cnt == 0:
+        health = "Good"
+        sev = 0
+    elif cnt < 5:
+        health = "Watch"
+        sev = 1
+    elif cnt < 15:
+        health = "Degraded"
+        sev = 2
+    else:
+        health = "Down"
+        sev = 3
+
+    headline = "No active incidents"
+    if cnt > 0:
+        headline = f"{cnt} alarms (top suspected: {suspected or 'N/A'})"
+
+    return {
+        "tenant": tenant_id,
+        "network": network_id,
+        "health": health,
+        "severity": sev,
+        "alarms": cnt,
+        "suspected": suspected,
+        "headline": headline,
+    }
+
+
+def _all_companies_view(selected_scenario: str):
+    st.subheader("All Companies View")
+    tenants = list_tenants()
+
+    rows = []
+    for t in tenants:
+        for n in list_networks(t):
+            p = get_paths(t, n)
+            rows.append(_summarize_scope(t, n, selected_scenario, topology_mtime(p.topology_path)))
+
+    # Sort by severity desc then alarms desc
+    rows.sort(key=lambda r: (r["severity"], r["alarms"]), reverse=True)
+
+    # Top N only (avoid flood)
+    TOP_N = 10
+    top_rows = rows[:TOP_N]
+
+    # Summary metrics (counts by health)
+    counts = {"Good": 0, "Watch": 0, "Degraded": 0, "Down": 0}
+    for r in rows:
+        counts[r["health"]] = counts.get(r["health"], 0) + 1
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Down", counts.get("Down", 0))
+    c2.metric("Degraded", counts.get("Degraded", 0))
+    c3.metric("Watch", counts.get("Watch", 0))
+    c4.metric("Good", counts.get("Good", 0))
+
+    # Table-like display without flooding alarms
+    for r in top_rows:
+        left, mid, right = st.columns([2, 5, 2])
+        left.write(f"**{r['tenant']} / {r['network']}**")
+        mid.write(f"**{r['health']}**  —  {r['headline']}")
+        if right.button("Open", key=f"open_{r['tenant']}_{r['network']}"):
+            st.session_state.tenant_id = r["tenant"]
+            st.session_state.network_id = r["network"]
+            _reset_for_scope_change()
+            st.rerun()
+
+    with st.expander("Show all scopes (compact list)"):
+        # compact list; still no raw alarm dump
+        for r in rows:
+            st.write(f"{r['tenant']} / {r['network']} — {r['health']} — {r['headline']}")
+
 
 api_key = None
 if "GOOGLE_API_KEY" in st.secrets:
