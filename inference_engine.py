@@ -30,7 +30,7 @@ class LogicalRCA:
             raise ValueError("GOOGLE_API_KEY environment variable is not set.")
         
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemma-3-12b-it')
+        self.model = genai.GenerativeModel('gemini-1.5-flash')
 
     def _load_topology(self, path: str) -> Dict:
         """JSONファイルからトポロジー情報を読み込む"""
@@ -91,13 +91,12 @@ class LogicalRCA:
 ### 設定ファイル (Config - Sanitized)
 ```text
 {safe_config}
+```
 
-```text
-{config_content}
-発生中のアラートリスト
-{json.dumps(alerts)}
+### 発生中のアラートリスト
+{json.dumps(safe_alerts)}
 
-判定ルール (Thinking Process)
+### 判定ルール (Thinking Process)
 １．電源(PSU)障害の判定:
   ・デバイスが複数のPSUを持っていると推測され、かつ「全て」ではなく「一部」のPSUのみがFailしている場合。
   ・判定: WARNING (理由: Redundancy Lost - 片系運転中)
@@ -113,74 +112,79 @@ class LogicalRCA:
 ３．その他:
 　・上記に当てはまらない不明なエラーや、CPU高負荷などは内容に応じて判断してください。
 
-出力フォーマット
-以下のJSON形式のみを出力してください。Markdownのコードブロック(json ...)は含めないでください。
+### 出力フォーマット
+以下のJSON形式のみを出力してください。Markdownのコードブロック(```json ...)は含めないでください。
 {{
-"status": "STATUS_STRING", // "NORMAL", "WARNING", "CRITICAL" のいずれか
-"reason": "判定理由を簡潔に記述",
-"impact_type": "IMPACT_STRING" // "NONE", "DEGRADED", "REDUNDANCY_LOST", "OUTAGE", "UNKNOWN" のいずれか
+  "status": "STATUS_STRING",
+  "reason": "判定理由を簡潔に記述",
+  "impact_type": "IMPACT_STRING"
 }}
+
+- status: "NORMAL", "WARNING", "CRITICAL" のいずれか
+- impact_type: "NONE", "DEGRADED", "REDUNDANCY_LOST", "OUTAGE", "UNKNOWN" のいずれか
 """
-try:
-        # LLMへの問い合わせ
-        response = self.model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
+
+        try:
+            # LLMへの問い合わせ
+            response = self.model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            
+            # レスポンス解析
+            response_text = response.text.strip()
+            if response_text.startswith("```json"):
+                response_text = response_text[7:]
+            if response_text.endswith("```"):
+                response_text = response_text[:-3]
+
+            result_json = json.loads(response_text)
+            
+            status_str = result_json.get("status", "CRITICAL").upper()
+            if status_str in ["GREEN", "NORMAL"]:
+                health_status = HealthStatus.NORMAL
+            elif status_str in ["YELLOW", "WARNING"]:
+                health_status = HealthStatus.WARNING
+            else:
+                health_status = HealthStatus.CRITICAL
+
+            return {
+                "status": health_status,
+                "reason": result_json.get("reason", "AI provided no reason"),
+                "impact_type": result_json.get("impact_type", "UNKNOWN")
+            }
+
+        except Exception as e:
+            print(f"[!] AI Inference Error: {e}")
+            return {
+                "status": HealthStatus.CRITICAL,
+                "reason": f"AI Analysis Failed: {str(e)}",
+                "impact_type": "AI_ERROR"
+            }
+
+
+if __name__ == "__main__":
+    # テスト用設定
+    TEST_TOPOLOGY = "topology.json"
+    TEST_CONFIG_DIR = "./configs"
+
+    # 簡易的なファイル生成（ディレクトリが存在しない場合のみ作成）
+    if not os.path.exists(TEST_CONFIG_DIR):
+        os.makedirs(TEST_CONFIG_DIR)
+
+    try:
+        # クラス名をLogicalRCAに変更して初期化
+        engine = LogicalRCA(TEST_TOPOLOGY, TEST_CONFIG_DIR)
         
-# レスポンス解析
-        response_text = response.text.strip()
-        if response_text.startswith("```json"):
-            response_text = response_text[7:]
-        if response_text.endswith("```"):
-            response_text = response_text[:-3]
-
-        result_json = json.loads(response_text)
+        print("--- AI Redundancy Analysis Test (LogicalRCA) ---")
+        test_device = "WAN_ROUTER_01"
+        test_alerts = ["Environment: PSU 1 Status Failed", "Environment: PSU 2 Status OK"]
         
-        status_str = result_json.get("status", "CRITICAL").upper()
-        if status_str in ["GREEN", "NORMAL"]:
-            health_status = HealthStatus.NORMAL
-        elif status_str in ["YELLOW", "WARNING"]:
-            health_status = HealthStatus.WARNING
-        else:
-            health_status = HealthStatus.CRITICAL
+        result = engine.analyze_redundancy_depth(test_device, test_alerts)
+        print(f"Result: {result['status'].value} ({result['impact_type']})")
+        print(f"Reason: {result['reason']}")
 
-        return {
-            "status": health_status,
-            "reason": result_json.get("reason", "AI provided no reason"),
-            "impact_type": result_json.get("impact_type", "UNKNOWN")
-        }
-
+    except ValueError as e:
+        print(f"Config Error: {e}")
     except Exception as e:
-        print(f"[!] AI Inference Error: {e}")
-        return {
-            "status": HealthStatus.CRITICAL,
-            "reason": f"AI Analysis Failed: {str(e)}",
-            "impact_type": "AI_ERROR"
-        }
-
-if name == "main":
-# テスト用設定
-TEST_TOPOLOGY = "topology.json"
-TEST_CONFIG_DIR = "./configs"
-
-# 簡易的なファイル生成（ディレクトリが存在しない場合のみ作成）
-if not os.path.exists(TEST_CONFIG_DIR):
-    os.makedirs(TEST_CONFIG_DIR)
-
-try:
-    # クラス名をLogicalRCAに変更して初期化
-    engine = LogicalRCA(TEST_TOPOLOGY, TEST_CONFIG_DIR)
-    
-    print("--- AI Redundancy Analysis Test (LogicalRCA) ---")
-    test_device = "WAN_ROUTER_01"
-    test_alerts = ["Environment: PSU 1 Status Failed", "Environment: PSU 2 Status OK"]
-    
-    result = engine.analyze_redundancy_depth(test_device, test_alerts)
-    print(f"Result: {result['status'].value} ({result['impact_type']})")
-    print(f"Reason: {result['reason']}")
-
-except ValueError as e:
-    print(f"Config Error: {e}")
-except Exception as e:
-    print(f"Execution Error: {e}")
+        print(f"Execution Error: {e}")
